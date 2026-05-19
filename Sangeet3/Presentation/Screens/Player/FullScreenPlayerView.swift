@@ -71,6 +71,11 @@ struct FullScreenPlayerView: View {
                                 Text(playbackManager.currentTrack?.artist ?? "Unknown Artist")
                                     .font(.title3)
                                     .foregroundStyle(SangeetTheme.textSecondary)
+
+                                if let track = playbackManager.currentTrack {
+                                    QualityBadgeView(track: track)
+                                        .padding(.top, 2)
+                                }
                             }
                             
                             // Heart and Download buttons below metadata

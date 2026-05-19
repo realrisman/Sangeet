@@ -82,15 +82,9 @@ struct UniversalSongRow: View {
                 .frame(width: 80, alignment: .trailing)
                 .monospacedDigit()
             
-            // Format (e.g., MP3 • 44.1)
-            Text(track.fileURL.pathExtension.uppercased())
-                .font(.caption.bold())
-                .foregroundStyle(SangeetTheme.textSecondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(SangeetTheme.surfaceElevated)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .frame(width: 60, alignment: .center)
+            // Audio quality (Hi-Res / Lossless / bitrate)
+            QualityBadgeView(track: track)
+                .frame(width: 74, alignment: .center)
             
             // File Size
             Text(fileSize)

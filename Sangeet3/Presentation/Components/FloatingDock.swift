@@ -105,24 +105,30 @@ struct TrackInfoView: View {
     @EnvironmentObject var playbackManager: PlaybackManager
     
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(playbackManager.currentTrack?.title ?? "Not Playing")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
-                
+
                 Text(playbackManager.currentTrack?.artist ?? "Select a song to play")
                     .font(.caption)
                     .foregroundStyle(SangeetTheme.textSecondary)
                     .lineLimit(1)
+
+                // Quality + bitrate on its own line so it doesn't widen
+                // the cluster into the centered playback controls.
+                if let track = playbackManager.currentTrack {
+                    QualityBadgeView(track: track, compact: true)
+                }
             }
             // Constrain width to avoid pushing center controls
-            .frame(maxWidth: 160, alignment: .leading)
-            
+            .frame(maxWidth: 170, alignment: .leading)
+
             if let track = playbackManager.currentTrack {
                 HeartButton(track: track, size: 16, color: SangeetTheme.textSecondary)
-                
+
                 // Show download button for remote tracks
                 if track.isRemote {
                     DownloadButton(track: track, size: 16, color: SangeetTheme.textSecondary)

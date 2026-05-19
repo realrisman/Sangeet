@@ -22,6 +22,9 @@ enum SangeetTheme {
     static let textSecondary = Color(hex: "B0B0B0")
     static let textMuted = Color(hex: "666666")
     
+    // Hi-Res audio badge accent (warm gold)
+    static let hiResGold = Color(hex: "E8B339")
+
     static var primaryGradient: LinearGradient { ThemeManager.shared.primaryGradient }
     static var accentGradient: LinearGradient { ThemeManager.shared.accentGradient }
     static var glowShadow: Color { ThemeManager.shared.glowShadow }
