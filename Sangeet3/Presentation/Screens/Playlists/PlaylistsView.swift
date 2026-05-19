@@ -13,7 +13,20 @@ struct PlaylistsView: View {
     @State private var showingCreateAlert = false
     @State private var newPlaylistName = ""
     @State private var isImporting = false
-    
+    @State private var searchText = ""
+    @AppStorage("playlistsListMode") private var isListMode = false
+
+    private var filteredPlaylists: [PlaylistRecord] {
+        guard !searchText.isEmpty else { return libraryManager.playlists }
+        return libraryManager.playlists.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    private var showFavorites: Bool {
+        searchText.isEmpty || "Favorites".localizedCaseInsensitiveContains(searchText)
+    }
+
     var body: some View {
         ZStack {
             // Main Playlist List
@@ -26,6 +39,20 @@ struct PlaylistsView: View {
                                 .font(.largeTitle.bold())
                                 .foregroundStyle(.white)
                             Spacer()
+                            Button(action: {
+                                withAnimation(.easeInOut(duration: 0.2)) { isListMode.toggle() }
+                            }) {
+                                Image(systemName: isListMode ? "square.grid.2x2" : "list.bullet")
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 8)
+                                    .background(SangeetTheme.surfaceElevated)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .help(isListMode ? "Grid view" : "List view")
+
                             Button(action: {
                                 guard !isImporting else { return }
                                 isImporting = true
@@ -65,45 +92,12 @@ struct PlaylistsView: View {
                         .padding(.horizontal, 24)
                         .padding(.top, 24)
                         
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 20)], spacing: 20) {
-                            // Favorites Card
-                            PlaylistCard(
-                                name: "Favorites",
-                                count: libraryManager.favorites.count,
-                                icon: "heart.fill",
-                                color: .red,
-                                isFavorites: true
-                            )
-                            .onTapGesture {
-                                let favRecord = PlaylistRecord(id: "favorites", name: "Favorites", isSystem: true)
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                    appState.playlistNavigationPath.append(favRecord)
-                                }
-                            }
-                            
-                            // User Playlists
-                            ForEach(libraryManager.playlists) { playlist in
-                                PlaylistCard(
-                                    name: playlist.name,
-                                    count: libraryManager.getTrackCount(for: playlist),
-                                    icon: "music.note.list",
-                                    color: SangeetTheme.secondary,
-                                    playlist: playlist
-                                )
-                                .contextMenu {
-                                    Button("Delete Playlist", role: .destructive) {
-                                        libraryManager.deletePlaylist(playlist)
-                                    }
-                                }
-                                .onTapGesture {
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                        appState.playlistNavigationPath.append(playlist)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 140)
+                        PlaylistSearchField(text: $searchText, placeholder: "Search playlists")
+                            .padding(.horizontal, 24)
+
+                        playlistCollection
+                            .padding(.horizontal, 24)
+                            .padding(.bottom, 140)
                     }
                 }
                 .transition(.opacity)
@@ -125,6 +119,186 @@ struct PlaylistsView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var playlistCollection: some View {
+        if !searchText.isEmpty && filteredPlaylists.isEmpty && !showFavorites {
+            VStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.title)
+                    .foregroundStyle(SangeetTheme.textMuted)
+                Text("No playlists matching \"\(searchText)\"")
+                    .foregroundStyle(SangeetTheme.textSecondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(40)
+        } else if isListMode {
+            LazyVStack(spacing: 8) {
+                if showFavorites {
+                    PlaylistRow(
+                        name: "Favorites",
+                        count: libraryManager.favorites.count,
+                        icon: "heart.fill",
+                        color: .red,
+                        isFavorites: true
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture { navigateToFavorites() }
+                }
+                ForEach(filteredPlaylists) { playlist in
+                    playlistItem(
+                        PlaylistRow(
+                            name: playlist.name,
+                            count: libraryManager.getTrackCount(for: playlist),
+                            icon: "music.note.list",
+                            color: SangeetTheme.secondary,
+                            playlist: playlist
+                        ),
+                        playlist: playlist
+                    )
+                }
+            }
+        } else {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 20)], spacing: 20) {
+                if showFavorites {
+                    PlaylistCard(
+                        name: "Favorites",
+                        count: libraryManager.favorites.count,
+                        icon: "heart.fill",
+                        color: .red,
+                        isFavorites: true
+                    )
+                    .onTapGesture { navigateToFavorites() }
+                }
+                ForEach(filteredPlaylists) { playlist in
+                    playlistItem(
+                        PlaylistCard(
+                            name: playlist.name,
+                            count: libraryManager.getTrackCount(for: playlist),
+                            icon: "music.note.list",
+                            color: SangeetTheme.secondary,
+                            playlist: playlist
+                        ),
+                        playlist: playlist
+                    )
+                }
+            }
+        }
+    }
+
+    private func playlistItem<Content: View>(_ content: Content, playlist: PlaylistRecord) -> some View {
+        content
+            .contextMenu {
+                Button("Delete Playlist", role: .destructive) {
+                    libraryManager.deletePlaylist(playlist)
+                }
+            }
+            .onTapGesture {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    appState.playlistNavigationPath.append(playlist)
+                }
+            }
+    }
+
+    private func navigateToFavorites() {
+        let favRecord = PlaylistRecord(id: "favorites", name: "Favorites", isSystem: true)
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            appState.playlistNavigationPath.append(favRecord)
+        }
+    }
+}
+
+struct PlaylistSearchField: View {
+    @Binding var text: String
+    var placeholder: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(SangeetTheme.textMuted)
+
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .foregroundStyle(.white)
+
+            if !text.isEmpty {
+                Button(action: { text = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(SangeetTheme.textMuted)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(SangeetTheme.surfaceElevated)
+        .clipShape(Capsule())
+    }
+}
+
+struct PlaylistRow: View {
+    @EnvironmentObject var libraryManager: LibraryManager
+    let name: String
+    let count: Int
+    let icon: String
+    let color: Color
+    var playlist: PlaylistRecord? = nil
+    var isFavorites: Bool = false
+
+    @State private var firstTrack: Track?
+
+    private var taskKey: String {
+        "\(playlist?.id ?? "favorites")-\(count)"
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            ZStack {
+                if let firstTrack, firstTrack.artworkData != nil {
+                    ArtworkView(track: firstTrack, size: 56, cornerRadius: 8)
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(SangeetTheme.surfaceElevated)
+                        .frame(width: 56, height: 56)
+                    Image(systemName: icon)
+                        .font(.system(size: 22))
+                        .foregroundStyle(color)
+                }
+            }
+            .frame(width: 56, height: 56)
+            .task(id: taskKey) {
+                if isFavorites {
+                    firstTrack = libraryManager.favorites.first
+                } else if let playlist {
+                    firstTrack = await libraryManager.getTracks(for: playlist).first
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                if count > 0 {
+                    Text("\(count) songs")
+                        .font(.caption)
+                        .foregroundStyle(SangeetTheme.textSecondary)
+                }
+            }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(SangeetTheme.textMuted)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(SangeetTheme.surface.opacity(0.4))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .contentShape(Rectangle())
     }
 }
 
