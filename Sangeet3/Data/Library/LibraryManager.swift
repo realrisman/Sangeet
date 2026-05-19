@@ -1398,12 +1398,12 @@ final class LibraryManager: ObservableObject {
     /// Presents an open panel to choose an `.m3u`/`.m3u8` file, imports it,
     /// and broadcasts the result via `.playlistImported`.
     @discardableResult
-    func presentImportPlaylistPanel() async -> PlaylistImportSummary? {
+    func presentImportPlaylistPanel() async -> [PlaylistImportSummary] {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.message = "Select an .m3u or .m3u8 playlist to import"
+        panel.allowsMultipleSelection = true
+        panel.message = "Select one or more .m3u or .m3u8 playlists to import"
         panel.prompt = "Import"
 
         var types: [UTType] = [.plainText, .text]
@@ -1413,43 +1413,36 @@ final class LibraryManager: ObservableObject {
         panel.allowedContentTypes = types
         panel.allowsOtherFileTypes = true
 
-        guard panel.runModal() == .OK, let chosen = panel.url else { return nil }
+        guard panel.runModal() == .OK else { return [] }
+        let urls = panel.urls
+        guard !urls.isEmpty else { return [] }
 
-        let summary = await importPlaylist(from: chosen)
-        NotificationCenter.default.post(name: .playlistImported, object: summary)
-        return summary
+        var summaries: [PlaylistImportSummary] = []
+        for url in urls {
+            // Sequential: importPlaylist -> createPlaylistReturning -> loadPlaylists()
+            // refreshes the in-memory `playlists` list, so a second same-named
+            // file in the batch sees the first's playlist and takes the sync
+            // path. Do NOT parallelize.
+            summaries.append(await importPlaylist(from: url))
+        }
+        NotificationCenter.default.post(name: .playlistImported, object: summaries)
+        return summaries
     }
 
-    /// Parses an `.m3u`/`.m3u8` file and imports it as a new playlist.
-    func importPlaylist(from url: URL) async -> PlaylistImportSummary {
-        let accessing = url.startAccessingSecurityScopedResource()
-        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+    /// Ordered tracks resolved from an `.m3u`/`.m3u8` file plus the
+    /// newly-created in-memory `Track`s that must enter the library.
+    private struct ResolvedImport {
+        var resolved: [Track] = []          // ordered, deduped by Track.id
+        var newDiskTracks: [Track] = []
+        var newRemoteTracks: [Track] = []
+    }
 
-        let baseName = url.deletingPathExtension().lastPathComponent
-        let entries = M3UParser.parse(fileURL: url)
-
-        var summary = PlaylistImportSummary(playlistName: baseName)
-        summary.totalEntries = entries.count
-
-        // Nothing parsed — do not create an empty playlist.
-        guard !entries.isEmpty else { return summary }
-
-        // Resolve a unique playlist name.
-        var finalName = baseName.isEmpty ? "Imported Playlist" : baseName
-        let existingNames = Set(playlists.map { $0.name })
-        if existingNames.contains(finalName) {
-            var n = 2
-            while existingNames.contains("\(finalName) \(n)") { n += 1 }
-            finalName = "\(finalName) \(n)"
-        }
-        summary.playlistName = finalName
-
-        guard let playlist = await createPlaylistReturning(name: finalName) else {
-            return summary
-        }
-
-        // Index existing local tracks by normalized path. Uses the same
-        // canonical key as the rest of the library so in-memory and DB
+    /// Resolves parsed `M3UEntry`s to library `Track`s. Matches existing
+    /// local tracks by canonical path, then by sanitized title+artist, then
+    /// falls back to reading the file off disk; remote URLs pass through.
+    private func resolveEntries(_ entries: [M3UEntry],
+                                into summary: inout PlaylistImportSummary) -> ResolvedImport {
+        // Same canonical key as the rest of the library so in-memory and DB
         // matching stay consistent.
         func normalize(_ u: URL) -> String { self.canonicalKey(u) }
         var existingByPath: [String: Track] = [:]
@@ -1457,10 +1450,8 @@ final class LibraryManager: ObservableObject {
             existingByPath[normalize(t.fileURL)] = t
         }
 
-        var resolved: [Track] = []
+        var out = ResolvedImport()
         var seenIds = Set<String>()
-        var newDiskTracks: [Track] = []
-        var newRemoteTracks: [Track] = []
 
         for entry in entries {
             var track: Track?
@@ -1472,7 +1463,7 @@ final class LibraryManager: ObservableObject {
                     duration: entry.duration ?? 0,
                     fileURL: remote
                 )
-                newRemoteTracks.append(t)
+                out.newRemoteTracks.append(t)
                 summary.remote += 1
                 track = t
             case .localPath(let path):
@@ -1490,7 +1481,7 @@ final class LibraryManager: ObservableObject {
                     if let title = entry.title, !title.isEmpty { t.title = title }
                     if let artist = entry.artist, !artist.isEmpty { t.artist = artist }
                     if let dur = entry.duration, dur > 0 { t.duration = dur }
-                    newDiskTracks.append(t)
+                    out.newDiskTracks.append(t)
                     summary.importedFromDisk += 1
                     track = t
                 } else {
@@ -1503,52 +1494,37 @@ final class LibraryManager: ObservableObject {
 
             if let t = track, !seenIds.contains(t.id.uuidString) {
                 seenIds.insert(t.id.uuidString)
-                resolved.append(t)
+                out.resolved.append(t)
             }
         }
+        return out
+    }
 
-        // Single transaction: insert tracks (if needed) + ordered junction rows.
-        // One transaction keeps `position` contiguous and race-free.
-        do {
-            _ = try DatabaseManager.shared.write { db in
-                var position = 0
-                for t in resolved {
-                    var trackId = t.id.uuidString
-                    let idExists = try TrackRecord
-                        .filter(Column("id") == trackId).fetchCount(db) > 0
-                    if !idExists {
-                        let filePath = t.fileURL.path
-                        // Honor the filePath UNIQUE constraint: reuse the
-                        // existing row's id if a track with this path exists.
-                        if let existing = try TrackRecord
-                            .filter(Column("filePath") == filePath).fetchOne(db) {
-                            trackId = existing.id
-                        } else {
-                            try TrackRecord(from: t).insert(db)
-                        }
-                    }
-                    // `playlistTrack` PK is (playlistId, trackId) — skip dupes.
-                    let pairExists = try PlaylistTrackRecord
-                        .filter(Column("playlistId") == playlist.id)
-                        .filter(Column("trackId") == trackId)
-                        .fetchCount(db) > 0
-                    if pairExists { continue }
-                    try PlaylistTrackRecord(
-                        playlistId: playlist.id,
-                        trackId: trackId,
-                        position: position,
-                        dateAdded: Date()
-                    ).insert(db)
-                    position += 1
-                }
+    /// Ensures a `TrackRecord` row exists for `t` and returns the row id to
+    /// use in `playlistTrack`. Honors the `filePath` UNIQUE constraint by
+    /// reusing an existing row that already owns the same path.
+    private func ensureTrackRecord(_ t: Track, _ db: Database) throws -> String {
+        var trackId = t.id.uuidString
+        let idExists = try TrackRecord
+            .filter(Column("id") == trackId).fetchCount(db) > 0
+        if !idExists {
+            let filePath = t.fileURL.path
+            if let existing = try TrackRecord
+                .filter(Column("filePath") == filePath).fetchOne(db) {
+                trackId = existing.id
+            } else {
+                try TrackRecord(from: t).insert(db)
             }
-        } catch {
-            print("[LibraryManager] importPlaylist DB write error: \(error)")
         }
+        return trackId
+    }
 
-        // Make imported tracks available in memory — `getTracks(for:)`
-        // resolves ids against `self.tracks`. Deduplicated so a file already
-        // in the library (matched in the DB by path) is never added twice.
+    /// Post-write in-memory side effects shared by every import outcome:
+    /// resolution may have introduced new disk/remote `Track`s that
+    /// `getTracks(for:)` must be able to resolve against `self.tracks`.
+    private func finishImport(playlistId: String,
+                              newDiskTracks: [Track],
+                              newRemoteTracks: [Track]) {
         let addedDisk = appendTracksDeduplicated(newDiskTracks)
         appendTracksDeduplicated(newRemoteTracks)
         rebuildIndexes()
@@ -1559,10 +1535,141 @@ final class LibraryManager: ObservableObject {
             }
         }
 
-        NotificationCenter.default.post(name: .playlistUpdated, object: playlist.id)
+        NotificationCenter.default.post(name: .playlistUpdated, object: playlistId)
         objectWillChange.send()
+    }
 
-        print("[LibraryManager] Imported '\(finalName)': matched=\(summary.matched) disk=\(summary.importedFromDisk) remote=\(summary.remote) missing=\(summary.missing)")
+    /// Parses an `.m3u`/`.m3u8` file and imports it. If a non-system playlist
+    /// with the same name already exists, its track list is synced to the
+    /// file (add/remove/reorder) instead of creating a duplicate.
+    func importPlaylist(from url: URL) async -> PlaylistImportSummary {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+        let baseName = url.deletingPathExtension().lastPathComponent
+        let entries = M3UParser.parse(fileURL: url)
+
+        var summary = PlaylistImportSummary(playlistName: baseName)
+        summary.totalEntries = entries.count
+
+        // Nothing parsed — do not create an empty playlist.
+        guard !entries.isEmpty else { return summary }
+
+        let desiredName = baseName.isEmpty ? "Imported Playlist" : baseName
+        let existing = playlists.first { $0.name == desiredName }
+
+        let resolvedImport: ResolvedImport
+        let targetPlaylistId: String
+
+        if let existing, !existing.isSystem {
+            // ---- UPDATE / SYNC PATH ----
+            summary.playlistName = existing.name
+            targetPlaylistId = existing.id
+            resolvedImport = resolveEntries(entries, into: &summary)
+
+            // A re-imported file whose entries ALL went missing yields an
+            // empty resolved list. Never wipe an existing playlist to empty —
+            // leave it as-is and report unchanged.
+            guard !resolvedImport.resolved.isEmpty else {
+                summary.outcome = .unchanged
+                print("[LibraryManager] Sync '\(existing.name)': resolved empty — leaving playlist unchanged")
+                return summary
+            }
+
+            do {
+                summary = try DatabaseManager.shared.write { db -> PlaylistImportSummary in
+                    var s = summary
+                    // Desired ordered ids (dedupe by canonical track id).
+                    var desiredIds: [String] = []
+                    var seen = Set<String>()
+                    for t in resolvedImport.resolved {
+                        let tid = try self.ensureTrackRecord(t, db)
+                        if seen.insert(tid).inserted { desiredIds.append(tid) }
+                    }
+                    // Current ordered ids.
+                    let currentIds = try PlaylistTrackRecord
+                        .filter(Column("playlistId") == existing.id)
+                        .order(Column("position"))
+                        .fetchAll(db)
+                        .map { $0.trackId }
+
+                    if currentIds == desiredIds {
+                        s.outcome = .unchanged          // no DB mutation
+                    } else {
+                        try PlaylistTrackRecord
+                            .filter(Column("playlistId") == existing.id)
+                            .deleteAll(db)
+                        let now = Date()
+                        for (i, tid) in desiredIds.enumerated() {
+                            try PlaylistTrackRecord(
+                                playlistId: existing.id, trackId: tid,
+                                position: i, dateAdded: now
+                            ).insert(db)
+                        }
+                        var pl = existing
+                        pl.dateModified = now
+                        try pl.update(db)
+
+                        let oldSet = Set(currentIds), newSet = Set(desiredIds)
+                        s.outcome = .updated
+                        s.tracksAdded = desiredIds.filter { !oldSet.contains($0) }.count
+                        s.tracksRemoved = currentIds.filter { !newSet.contains($0) }.count
+                    }
+                    return s
+                }
+            } catch {
+                print("[LibraryManager] importPlaylist sync DB write error: \(error)")
+            }
+        } else {
+            // ---- CREATE PATH ---- (no match, or match is a system playlist)
+            var finalName = desiredName
+            if existing != nil {  // collided with a system playlist — number it
+                let existingNames = Set(playlists.map { $0.name })
+                var n = 2
+                while existingNames.contains("\(finalName) \(n)") { n += 1 }
+                finalName = "\(finalName) \(n)"
+            }
+            summary.playlistName = finalName
+            summary.outcome = .created
+
+            guard let created = await createPlaylistReturning(name: finalName) else {
+                return summary
+            }
+            targetPlaylistId = created.id
+            resolvedImport = resolveEntries(entries, into: &summary)
+
+            // Single transaction: insert tracks (if needed) + ordered junction
+            // rows. One transaction keeps `position` contiguous and race-free.
+            do {
+                _ = try DatabaseManager.shared.write { db in
+                    var position = 0
+                    for t in resolvedImport.resolved {
+                        let trackId = try self.ensureTrackRecord(t, db)
+                        // `playlistTrack` PK is (playlistId, trackId) — skip dupes.
+                        let pairExists = try PlaylistTrackRecord
+                            .filter(Column("playlistId") == created.id)
+                            .filter(Column("trackId") == trackId)
+                            .fetchCount(db) > 0
+                        if pairExists { continue }
+                        try PlaylistTrackRecord(
+                            playlistId: created.id,
+                            trackId: trackId,
+                            position: position,
+                            dateAdded: Date()
+                        ).insert(db)
+                        position += 1
+                    }
+                }
+            } catch {
+                print("[LibraryManager] importPlaylist DB write error: \(error)")
+            }
+        }
+
+        finishImport(playlistId: targetPlaylistId,
+                     newDiskTracks: resolvedImport.newDiskTracks,
+                     newRemoteTracks: resolvedImport.newRemoteTracks)
+
+        print("[LibraryManager] Import '\(summary.playlistName)' outcome=\(summary.outcome) matched=\(summary.matched) disk=\(summary.importedFromDisk) remote=\(summary.remote) missing=\(summary.missing) +\(summary.tracksAdded)/-\(summary.tracksRemoved)")
         return summary
     }
 }
@@ -1570,7 +1677,12 @@ final class LibraryManager: ObservableObject {
 // MARK: - M3U Playlist Import Models
 
 struct PlaylistImportSummary {
+    /// Whether the import created a new playlist, synced an existing one,
+    /// or found the existing playlist already identical to the file.
+    enum Outcome { case created, updated, unchanged }
+
     var playlistName: String
+    var outcome: Outcome = .created
     var totalEntries: Int = 0
     var matched: Int = 0
     var importedFromDisk: Int = 0
@@ -1578,7 +1690,11 @@ struct PlaylistImportSummary {
     var missing: Int = 0
     var missingNames: [String] = []
 
-    /// Number of tracks actually added to the playlist.
+    /// Populated only on the sync (`.updated`) path.
+    var tracksAdded: Int = 0
+    var tracksRemoved: Int = 0
+
+    /// Number of tracks resolved into the playlist (added or already present).
     var addedCount: Int { matched + importedFromDisk + remote }
     /// True when the file could not be parsed into any entries.
     var parseFailed: Bool { totalEntries == 0 }

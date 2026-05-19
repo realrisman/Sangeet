@@ -18,7 +18,7 @@ struct ContentView: View {
     @State private var showingCreatePlaylistAlert = false
     @State private var newPlaylistName = ""
     @State private var trackToAddAfterCreation: Track?
-    @State private var importSummary: PlaylistImportSummary?
+    @State private var importSummaries: [PlaylistImportSummary] = []
     @State private var showImportResultAlert = false
     
     var body: some View {
@@ -142,27 +142,67 @@ struct ContentView: View {
         // Playlist Import Result Handler (covers both the Playlists button
         // and the File ▸ Import Playlist… menu command)
         .onReceive(NotificationCenter.default.publisher(for: .playlistImported)) { note in
-            if let summary = note.object as? PlaylistImportSummary {
-                self.importSummary = summary
+            if let summaries = note.object as? [PlaylistImportSummary], !summaries.isEmpty {
+                self.importSummaries = summaries
                 self.showImportResultAlert = true
             }
         }
-        .alert("Playlist Import", isPresented: $showImportResultAlert, presenting: importSummary) { _ in
+        .alert("Playlist Import", isPresented: $showImportResultAlert) {
             Button("OK", role: .cancel) { }
-        } message: { summary in
-            Text(importResultMessage(for: summary))
+        } message: {
+            Text(importResultMessage(for: importSummaries))
         }
         .onAppear {
             setupArrowKeyMonitor()
         }
     }
 
-    private func importResultMessage(for s: PlaylistImportSummary) -> String {
+    private func importResultMessage(for summaries: [PlaylistImportSummary]) -> String {
+        if summaries.count == 1, let s = summaries.first {
+            return singleSummaryMessage(s)
+        }
+        let created   = summaries.filter { $0.outcome == .created   && !$0.parseFailed }.count
+        let updated   = summaries.filter { $0.outcome == .updated   && !$0.parseFailed }.count
+        let unchanged = summaries.filter { $0.outcome == .unchanged && !$0.parseFailed }.count
+        let failed    = summaries.filter { $0.parseFailed }.count
+
+        var head: [String] = []
+        if created   > 0 { head.append("\(created) created") }
+        if updated   > 0 { head.append("\(updated) updated") }
+        if unchanged > 0 { head.append("\(unchanged) unchanged") }
+        if failed    > 0 { head.append("\(failed) failed") }
+
+        var lines: [String] = [head.joined(separator: ", ")]
+        for s in summaries {
+            if s.parseFailed {
+                lines.append("• \"\(s.playlistName)\": could not be read")
+                continue
+            }
+            switch s.outcome {
+            case .created:
+                lines.append("• \"\(s.playlistName)\": created, \(s.addedCount)/\(s.totalEntries) tracks\(s.missing > 0 ? ", \(s.missing) missing" : "")")
+            case .updated:
+                lines.append("• \"\(s.playlistName)\": updated (+\(s.tracksAdded) / -\(s.tracksRemoved))\(s.missing > 0 ? ", \(s.missing) missing" : "")")
+            case .unchanged:
+                lines.append("• \"\(s.playlistName)\": unchanged")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func singleSummaryMessage(_ s: PlaylistImportSummary) -> String {
         if s.parseFailed {
             return "Could not read any tracks from this file. Make sure it is a valid .m3u or .m3u8 playlist."
         }
         var lines: [String] = []
-        lines.append("\"\(s.playlistName)\" created with \(s.addedCount) of \(s.totalEntries) tracks.")
+        switch s.outcome {
+        case .created:
+            lines.append("\"\(s.playlistName)\" created with \(s.addedCount) of \(s.totalEntries) tracks.")
+        case .updated:
+            lines.append("\"\(s.playlistName)\" synced (+\(s.tracksAdded) added, -\(s.tracksRemoved) removed).")
+        case .unchanged:
+            lines.append("\"\(s.playlistName)\" already up to date — no changes.")
+        }
         if s.matched > 0 { lines.append("• \(s.matched) matched from your library") }
         if s.importedFromDisk > 0 { lines.append("• \(s.importedFromDisk) imported from disk") }
         if s.remote > 0 { lines.append("• \(s.remote) streaming") }
