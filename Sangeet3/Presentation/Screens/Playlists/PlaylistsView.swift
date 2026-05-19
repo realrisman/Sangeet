@@ -372,7 +372,17 @@ struct PlaylistDetailView: View {
     
     @State private var tracks: [Track] = []
     @State private var selectedTrack: Track? // Added for UniversalSongRow
-    
+    @State private var trackSearchText = ""
+
+    private var filteredTracks: [Track] {
+        guard !trackSearchText.isEmpty else { return tracks }
+        return tracks.filter {
+            $0.title.localizedCaseInsensitiveContains(trackSearchText) ||
+            $0.artist.localizedCaseInsensitiveContains(trackSearchText) ||
+            $0.album.localizedCaseInsensitiveContains(trackSearchText)
+        }
+    }
+
     var title: String {
         if isFavorites { return "Favorites" }
         if playlist?.id == "recentlyAdded" { return "Recently Added" }
@@ -424,10 +434,27 @@ struct PlaylistDetailView: View {
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 24)
-                
+
+                if !tracks.isEmpty {
+                    PlaylistSearchField(text: $trackSearchText, placeholder: "Search in playlist")
+                        .padding(.horizontal, 24)
+                }
+
+                if !trackSearchText.isEmpty && filteredTracks.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.title)
+                            .foregroundStyle(SangeetTheme.textMuted)
+                        Text("No results for \"\(trackSearchText)\"")
+                            .foregroundStyle(SangeetTheme.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(40)
+                }
+
                 // Track List
                 LazyVStack(spacing: 0) {
-                    ForEach(tracks) { track in
+                    ForEach(filteredTracks) { track in
                         UniversalSongRow(track: track, selectedTrack: $selectedTrack)
                             .contextMenu {
                                 Button {
