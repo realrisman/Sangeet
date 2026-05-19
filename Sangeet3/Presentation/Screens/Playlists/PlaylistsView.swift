@@ -71,7 +71,8 @@ struct PlaylistsView: View {
                                 name: "Favorites",
                                 count: libraryManager.favorites.count,
                                 icon: "heart.fill",
-                                color: .red
+                                color: .red,
+                                isFavorites: true
                             )
                             .onTapGesture {
                                 let favRecord = PlaylistRecord(id: "favorites", name: "Favorites", isSystem: true)
@@ -86,7 +87,8 @@ struct PlaylistsView: View {
                                     name: playlist.name,
                                     count: libraryManager.getTrackCount(for: playlist),
                                     icon: "music.note.list",
-                                    color: SangeetTheme.secondary
+                                    color: SangeetTheme.secondary,
+                                    playlist: playlist
                                 )
                                 .contextMenu {
                                     Button("Delete Playlist", role: .destructive) {
@@ -127,23 +129,49 @@ struct PlaylistsView: View {
 }
 
 struct PlaylistCard: View {
+    @EnvironmentObject var libraryManager: LibraryManager
     let name: String
     let count: Int
     let icon: String
     let color: Color
-    
+    var playlist: PlaylistRecord? = nil
+    var isFavorites: Bool = false
+
+    @State private var firstTrack: Track?
+
+    private var taskKey: String {
+        "\(playlist?.id ?? "favorites")-\(count)"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(SangeetTheme.surfaceElevated)
-                    .aspectRatio(1.0, contentMode: .fit)
-                
-                Image(systemName: icon)
-                    .font(.system(size: 48))
-                    .foregroundStyle(color)
+                if let firstTrack, firstTrack.artworkData != nil {
+                    Color.clear
+                        .aspectRatio(1.0, contentMode: .fit)
+                        .overlay {
+                            GeometryReader { proxy in
+                                ArtworkView(track: firstTrack, size: proxy.size.width, cornerRadius: 12)
+                            }
+                        }
+                } else {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(SangeetTheme.surfaceElevated)
+                        .aspectRatio(1.0, contentMode: .fit)
+
+                    Image(systemName: icon)
+                        .font(.system(size: 48))
+                        .foregroundStyle(color)
+                }
             }
-            
+            .task(id: taskKey) {
+                if isFavorites {
+                    firstTrack = libraryManager.favorites.first
+                } else if let playlist {
+                    firstTrack = await libraryManager.getTracks(for: playlist).first
+                }
+            }
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(name)
                     .font(.headline)
