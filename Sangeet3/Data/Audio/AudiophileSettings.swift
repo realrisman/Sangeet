@@ -93,4 +93,5 @@ extension Notification.Name {
     static let audioSettingsChanged = Notification.Name("audioSettingsChanged")
     static let playlistUpdated = Notification.Name("playlistUpdated")
     static let createPlaylistRequested = Notification.Name("createPlaylistRequested")
+    static let playlistImported = Notification.Name("playlistImported")
 }

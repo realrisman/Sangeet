@@ -31,7 +31,16 @@ struct Sangeet3App: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .newItem) { }
-            
+
+            CommandGroup(after: .newItem) {
+                Button("Import Playlist…") {
+                    Task { @MainActor in
+                        await LibraryManager.shared.presentImportPlaylistPanel()
+                    }
+                }
+                .keyboardShortcut("o", modifiers: .command)
+            }
+
             CommandMenu("Playback") {
                 Button("Play/Pause") {
                     playbackManager.togglePlayPause()

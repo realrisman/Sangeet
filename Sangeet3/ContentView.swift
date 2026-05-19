@@ -18,6 +18,8 @@ struct ContentView: View {
     @State private var showingCreatePlaylistAlert = false
     @State private var newPlaylistName = ""
     @State private var trackToAddAfterCreation: Track?
+    @State private var importSummary: PlaylistImportSummary?
+    @State private var showImportResultAlert = false
     
     var body: some View {
         ZStack {
@@ -137,9 +139,41 @@ struct ContentView: View {
                 }
             }
         }
+        // Playlist Import Result Handler (covers both the Playlists button
+        // and the File ▸ Import Playlist… menu command)
+        .onReceive(NotificationCenter.default.publisher(for: .playlistImported)) { note in
+            if let summary = note.object as? PlaylistImportSummary {
+                self.importSummary = summary
+                self.showImportResultAlert = true
+            }
+        }
+        .alert("Playlist Import", isPresented: $showImportResultAlert, presenting: importSummary) { _ in
+            Button("OK", role: .cancel) { }
+        } message: { summary in
+            Text(importResultMessage(for: summary))
+        }
         .onAppear {
             setupArrowKeyMonitor()
         }
+    }
+
+    private func importResultMessage(for s: PlaylistImportSummary) -> String {
+        if s.parseFailed {
+            return "Could not read any tracks from this file. Make sure it is a valid .m3u or .m3u8 playlist."
+        }
+        var lines: [String] = []
+        lines.append("\"\(s.playlistName)\" created with \(s.addedCount) of \(s.totalEntries) tracks.")
+        if s.matched > 0 { lines.append("• \(s.matched) matched from your library") }
+        if s.importedFromDisk > 0 { lines.append("• \(s.importedFromDisk) imported from disk") }
+        if s.remote > 0 { lines.append("• \(s.remote) streaming") }
+        if s.missing > 0 {
+            lines.append("• \(s.missing) not found")
+            let preview = s.missingNames.prefix(5).joined(separator: ", ")
+            if !preview.isEmpty {
+                lines.append("Missing: \(preview)\(s.missing > 5 ? "…" : "")")
+            }
+        }
+        return lines.joined(separator: "\n")
     }
     
     // MARK: - Smart Arrow Key Handling

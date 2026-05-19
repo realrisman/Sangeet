@@ -12,6 +12,7 @@ struct PlaylistsView: View {
     @EnvironmentObject var libraryManager: LibraryManager
     @State private var showingCreateAlert = false
     @State private var newPlaylistName = ""
+    @State private var isImporting = false
     
     var body: some View {
         ZStack {
@@ -25,6 +26,28 @@ struct PlaylistsView: View {
                                 .font(.largeTitle.bold())
                                 .foregroundStyle(.white)
                             Spacer()
+                            Button(action: {
+                                guard !isImporting else { return }
+                                isImporting = true
+                                Task {
+                                    await libraryManager.presentImportPlaylistPanel()
+                                    isImporting = false
+                                }
+                            }) {
+                                HStack {
+                                    Image(systemName: "square.and.arrow.down")
+                                    Text("Import")
+                                }
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(SangeetTheme.surfaceElevated)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isImporting)
+
                             Button(action: { showingCreateAlert = true }) {
                                 HStack {
                                     Image(systemName: "plus.circle.fill")

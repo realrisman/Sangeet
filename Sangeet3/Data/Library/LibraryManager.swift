@@ -11,6 +11,7 @@ import Foundation
 import Combine
 import AppKit
 import GRDB
+import UniformTypeIdentifiers
 
 /// Manages music library with GRDB persistence
 @MainActor
@@ -1269,6 +1270,316 @@ final class LibraryManager: ObservableObject {
         recentlyPlayedSongs = Array(tracks.filter { $0.lastPlayed != nil }
             .sorted { $0.lastPlayed! > $1.lastPlayed! }
             .prefix(25))
+    }
+
+    // MARK: - M3U Playlist Import
+
+    /// Creates a playlist and returns the created record.
+    /// (`PlaylistRecord` generates its own id at init, so no re-fetch is needed.)
+    @discardableResult
+    func createPlaylistReturning(name: String) async -> PlaylistRecord? {
+        let playlist = PlaylistRecord(name: name, isSystem: false)
+        do {
+            _ = try DatabaseManager.shared.write { db in
+                try playlist.insert(db)
+            }
+            await loadPlaylists()
+            print("[LibraryManager] Created playlist (returning): '\(name)'")
+            return playlist
+        } catch {
+            print("[LibraryManager] createPlaylistReturning error: \(error)")
+            return nil
+        }
+    }
+
+    /// Presents an open panel to choose an `.m3u`/`.m3u8` file, imports it,
+    /// and broadcasts the result via `.playlistImported`.
+    @discardableResult
+    func presentImportPlaylistPanel() async -> PlaylistImportSummary? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Select an .m3u or .m3u8 playlist to import"
+        panel.prompt = "Import"
+
+        var types: [UTType] = [.plainText, .text]
+        if let t = UTType(filenameExtension: "m3u") { types.append(t) }
+        if let t = UTType(filenameExtension: "m3u8") { types.append(t) }
+        if let t = UTType("public.m3u-playlist") { types.append(t) }
+        panel.allowedContentTypes = types
+        panel.allowsOtherFileTypes = true
+
+        guard panel.runModal() == .OK, let chosen = panel.url else { return nil }
+
+        let summary = await importPlaylist(from: chosen)
+        NotificationCenter.default.post(name: .playlistImported, object: summary)
+        return summary
+    }
+
+    /// Parses an `.m3u`/`.m3u8` file and imports it as a new playlist.
+    func importPlaylist(from url: URL) async -> PlaylistImportSummary {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+        let baseName = url.deletingPathExtension().lastPathComponent
+        let entries = M3UParser.parse(fileURL: url)
+
+        var summary = PlaylistImportSummary(playlistName: baseName)
+        summary.totalEntries = entries.count
+
+        // Nothing parsed — do not create an empty playlist.
+        guard !entries.isEmpty else { return summary }
+
+        // Resolve a unique playlist name.
+        var finalName = baseName.isEmpty ? "Imported Playlist" : baseName
+        let existingNames = Set(playlists.map { $0.name })
+        if existingNames.contains(finalName) {
+            var n = 2
+            while existingNames.contains("\(finalName) \(n)") { n += 1 }
+            finalName = "\(finalName) \(n)"
+        }
+        summary.playlistName = finalName
+
+        guard let playlist = await createPlaylistReturning(name: finalName) else {
+            return summary
+        }
+
+        // Index existing local tracks by normalized path.
+        func normalize(_ u: URL) -> String {
+            u.resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
+        }
+        var existingByPath: [String: Track] = [:]
+        for t in tracks where !t.isRemote {
+            existingByPath[normalize(t.fileURL)] = t
+        }
+
+        var resolved: [Track] = []
+        var seenIds = Set<String>()
+        var newDiskTracks: [Track] = []
+        var newRemoteTracks: [Track] = []
+
+        for entry in entries {
+            var track: Track?
+            switch entry.kind {
+            case .remoteURL(let remote):
+                let t = Track(
+                    title: entry.title ?? remote.lastPathComponent,
+                    artist: entry.artist ?? "Unknown Artist",
+                    duration: entry.duration ?? 0,
+                    fileURL: remote
+                )
+                newRemoteTracks.append(t)
+                summary.remote += 1
+                track = t
+            case .localPath(let path):
+                let fileURL = URL(fileURLWithPath: path)
+                let key = normalize(fileURL)
+                if let match = existingByPath[key] {
+                    track = match
+                    summary.matched += 1
+                } else if let title = entry.title,
+                          let found = findLocalTrack(title: title, artist: entry.artist ?? "") {
+                    track = found
+                    summary.matched += 1
+                } else if FileManager.default.fileExists(atPath: fileURL.path) {
+                    var t = createTrackFast(from: fileURL)
+                    if let title = entry.title, !title.isEmpty { t.title = title }
+                    if let artist = entry.artist, !artist.isEmpty { t.artist = artist }
+                    if let dur = entry.duration, dur > 0 { t.duration = dur }
+                    newDiskTracks.append(t)
+                    summary.importedFromDisk += 1
+                    track = t
+                } else {
+                    summary.missing += 1
+                    if summary.missingNames.count < 25 {
+                        summary.missingNames.append(entry.title ?? fileURL.lastPathComponent)
+                    }
+                }
+            }
+
+            if let t = track, !seenIds.contains(t.id.uuidString) {
+                seenIds.insert(t.id.uuidString)
+                resolved.append(t)
+            }
+        }
+
+        // Single transaction: insert tracks (if needed) + ordered junction rows.
+        // One transaction keeps `position` contiguous and race-free.
+        do {
+            _ = try DatabaseManager.shared.write { db in
+                var position = 0
+                for t in resolved {
+                    var trackId = t.id.uuidString
+                    let idExists = try TrackRecord
+                        .filter(Column("id") == trackId).fetchCount(db) > 0
+                    if !idExists {
+                        let filePath = t.fileURL.path
+                        // Honor the filePath UNIQUE constraint: reuse the
+                        // existing row's id if a track with this path exists.
+                        if let existing = try TrackRecord
+                            .filter(Column("filePath") == filePath).fetchOne(db) {
+                            trackId = existing.id
+                        } else {
+                            try TrackRecord(from: t).insert(db)
+                        }
+                    }
+                    // `playlistTrack` PK is (playlistId, trackId) — skip dupes.
+                    let pairExists = try PlaylistTrackRecord
+                        .filter(Column("playlistId") == playlist.id)
+                        .filter(Column("trackId") == trackId)
+                        .fetchCount(db) > 0
+                    if pairExists { continue }
+                    try PlaylistTrackRecord(
+                        playlistId: playlist.id,
+                        trackId: trackId,
+                        position: position,
+                        dateAdded: Date()
+                    ).insert(db)
+                    position += 1
+                }
+            }
+        } catch {
+            print("[LibraryManager] importPlaylist DB write error: \(error)")
+        }
+
+        // Make imported tracks available in memory — `getTracks(for:)`
+        // resolves ids against `self.tracks`.
+        tracks.append(contentsOf: newDiskTracks)
+        tracks.append(contentsOf: newRemoteTracks)
+        rebuildIndexes()
+
+        if !newDiskTracks.isEmpty {
+            Task.detached(priority: .background) { [weak self] in
+                await self?.extractMetadataInBackground(for: newDiskTracks)
+            }
+        }
+
+        NotificationCenter.default.post(name: .playlistUpdated, object: playlist.id)
+        objectWillChange.send()
+
+        print("[LibraryManager] Imported '\(finalName)': matched=\(summary.matched) disk=\(summary.importedFromDisk) remote=\(summary.remote) missing=\(summary.missing)")
+        return summary
+    }
+}
+
+// MARK: - M3U Playlist Import Models
+
+struct PlaylistImportSummary {
+    var playlistName: String
+    var totalEntries: Int = 0
+    var matched: Int = 0
+    var importedFromDisk: Int = 0
+    var remote: Int = 0
+    var missing: Int = 0
+    var missingNames: [String] = []
+
+    /// Number of tracks actually added to the playlist.
+    var addedCount: Int { matched + importedFromDisk + remote }
+    /// True when the file could not be parsed into any entries.
+    var parseFailed: Bool { totalEntries == 0 }
+}
+
+struct M3UEntry {
+    enum Kind {
+        case localPath(String)
+        case remoteURL(URL)
+    }
+    var kind: Kind
+    var title: String?
+    var artist: String?
+    var duration: TimeInterval?
+}
+
+/// Minimal `.m3u`/`.m3u8` parser. Handles `#EXTM3U`, `#EXTINF`,
+/// CRLF line endings, BOM, Windows backslash paths, relative/absolute
+/// local paths, `file://` and `http(s)`/`tidal` URLs.
+enum M3UParser {
+    static func parse(fileURL: URL) -> [M3UEntry] {
+        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        let text: String
+        if let utf8 = String(data: data, encoding: .utf8) {
+            text = utf8
+        } else if let latin1 = String(data: data, encoding: .isoLatin1) {
+            text = latin1
+        } else {
+            return []
+        }
+        return parse(text: text, baseDirectory: fileURL.deletingLastPathComponent())
+    }
+
+    static func parse(text: String, baseDirectory: URL) -> [M3UEntry] {
+        var entries: [M3UEntry] = []
+        var pendingTitle: String?
+        var pendingArtist: String?
+        var pendingDuration: TimeInterval?
+
+        var content = text
+        if content.hasPrefix("\u{FEFF}") { content.removeFirst() }
+
+        for rawLine in content.components(separatedBy: "\n") {
+            var line = rawLine
+            if line.hasSuffix("\r") { line.removeLast() }
+            line = line.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+
+            if line.hasPrefix("#") {
+                if line.uppercased().hasPrefix("#EXTINF:") {
+                    let payload = String(line.dropFirst("#EXTINF:".count))
+                    if let commaIdx = payload.firstIndex(of: ",") {
+                        let durStr = payload[payload.startIndex..<commaIdx]
+                            .trimmingCharacters(in: .whitespaces)
+                        if let d = TimeInterval(durStr), d > 0 { pendingDuration = d }
+                        let titlePart = String(payload[payload.index(after: commaIdx)...])
+                            .trimmingCharacters(in: .whitespaces)
+                        if !titlePart.isEmpty {
+                            let parts = titlePart.components(separatedBy: " - ")
+                            if parts.count >= 2 {
+                                pendingArtist = parts[0].trimmingCharacters(in: .whitespaces)
+                                pendingTitle = parts.dropFirst().joined(separator: " - ")
+                                    .trimmingCharacters(in: .whitespaces)
+                            } else {
+                                pendingTitle = titlePart
+                            }
+                        }
+                    }
+                }
+                // Ignore #EXTM3U and any other directive.
+                continue
+            }
+
+            let kind: M3UEntry.Kind
+            let lower = line.lowercased()
+            if lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("tidal:") {
+                guard let u = URL(string: line) else {
+                    pendingTitle = nil; pendingArtist = nil; pendingDuration = nil
+                    continue
+                }
+                kind = .remoteURL(u)
+            } else if lower.hasPrefix("file://") {
+                let path = URL(string: line)?.path ?? line
+                kind = .localPath(path)
+            } else {
+                var path = line.replacingOccurrences(of: "\\", with: "/")
+                if !path.hasPrefix("/") {
+                    path = baseDirectory.appendingPathComponent(path)
+                        .standardizedFileURL.path
+                }
+                kind = .localPath(path)
+            }
+
+            entries.append(M3UEntry(
+                kind: kind,
+                title: pendingTitle,
+                artist: pendingArtist,
+                duration: pendingDuration
+            ))
+            pendingTitle = nil
+            pendingArtist = nil
+            pendingDuration = nil
+        }
+
+        return entries
     }
 }
 
