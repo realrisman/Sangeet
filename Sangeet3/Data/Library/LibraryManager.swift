@@ -94,6 +94,8 @@ final class LibraryManager: ObservableObject {
         
         await MainActor.run {
             self.tracks = trackRecords?.map { $0.toTrack() } ?? []
+            // One-time repair for libraries that already accumulated duplicates.
+            self.deduplicateLoadedLibrary()
             self.rebuildIndexes()
         }
         
@@ -273,6 +275,11 @@ final class LibraryManager: ObservableObject {
     // MARK: - Folder Monitoring
     
     private var folderMonitors: [URL: FolderMonitor] = [:]
+
+    /// Serializes folder scans. The launch `scanAllFolders()` and
+    /// folder-monitor-triggered scans must never run concurrently, otherwise
+    /// they read stale state and both append the same tracks.
+    private var scanChain: Task<Void, Never>?
     
     private func startMonitoring(folder: URL) {
         // Stop existing if any
@@ -315,27 +322,30 @@ final class LibraryManager: ObservableObject {
         }
     }
     
+    /// Public entry point. Chains onto any in-flight scan so scans never run
+    /// concurrently, then awaits its own turn so callers still block until
+    /// their scan completes (preserving previous behaviour).
     private func scanFolder(_ url: URL) async {
-        await MainActor.run {
-            self.isScanning = true
+        let previous = scanChain
+        let task = Task { [weak self] in
+            await previous?.value
+            await self?.performScanFolder(url)
         }
-        
+        scanChain = task
+        await task.value
+    }
+
+    private func performScanFolder(_ url: URL) async {
+        self.isScanning = true
+        defer { self.isScanning = false }
+
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-        
-        // 1. Get ALL DB tracks for this folder (for pruning)
-        let dbTracks = (try? DatabaseManager.shared.read { db in
-            try TrackRecord
-                .filter(Column("folderPath") == url.path)
-                .fetchAll(db)
-        }) ?? []
-        
-        var dbPaths = Set(dbTracks.map { $0.filePath })
-        
-        // 2. Scan File System
+
+        // 1. Enumerate the filesystem (recursive — includes Artist/Album subdirs).
         let fileManager = FileManager.default
         print("[LibraryManager] enumerating: \(url.path)")
-        
+
         guard let enumerator = fileManager.enumerator(
             at: url,
             includingPropertiesForKeys: [.isRegularFileKey, .creationDateKey],
@@ -344,92 +354,82 @@ final class LibraryManager: ObservableObject {
             print("[LibraryManager] Failed to create enumerator for \(url.path)")
             return
         }
-        
-        // Manual iteration to debug
-        var allFiles: [URL] = []
-        for case let fileURL as URL in enumerator {
-            allFiles.append(fileURL)
+
+        var diskURLs: [URL] = []
+        for case let fileURL as URL in enumerator
+            where supportedExtensions.contains(fileURL.pathExtension.lowercased()) {
+            diskURLs.append(fileURL)
         }
-        
-        print("[LibraryManager] Scanning \(url.path): Found \(allFiles.count) files")
-        if allFiles.isEmpty {
-             // Fallback check
-             let contents = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
-             print("[LibraryManager] Fallback check: contentsOfDirectory found \(contents?.count ?? 0) items")
+        print("[LibraryManager] Scanning \(url.path): Found \(diskURLs.count) audio files")
+
+        // Identity keys for everything currently on disk under this folder.
+        let foundKeys = Set(diskURLs.map { canonicalKey($0) })
+
+        // 2. New files = on disk but not already represented in memory.
+        //    Memory mirrors the DB (loaded + deduplicated at launch), so this
+        //    is the single source of truth — no folderPath-filtered DB query,
+        //    which was wrong for files in subdirectories.
+        let existingKeys = Set(
+            tracks.lazy.filter { !$0.isRemote }.map { self.canonicalKey($0.fileURL) }
+        )
+        let newTracks = diskURLs
+            .filter { !existingKeys.contains(canonicalKey($0)) }
+            .map { createTrackFast(from: $0) }
+
+        // 3. Pruning: local tracks under this folder whose file is gone.
+        let root = url.path.hasSuffix("/") ? url.path : url.path + "/"
+        let removed = tracks.filter { t in
+            guard !t.isRemote else { return false }
+            let p = t.fileURL.path
+            guard p == url.path || p.hasPrefix(root) else { return false }
+            return !foundKeys.contains(canonicalKey(t.fileURL))
         }
-        
-        var newTracks: [Track] = []
-        var foundPaths: Set<String> = []
-        
-        for fileURL in allFiles {
-            let ext = fileURL.pathExtension.lowercased()
-            // Debug print for first few files
-            if foundPaths.count < 3 { print("[LibraryManager] Checking: \(fileURL.lastPathComponent) (\(ext))") }
-            
-            guard supportedExtensions.contains(ext) else { continue }
-            
-            let path = fileURL.path
-            foundPaths.insert(path)
-            
-            // If exists in DB, remove from dbPaths (so remaining dbPaths are deletions)
-            if dbPaths.contains(path) {
-                dbPaths.remove(path)
-                continue
+        if !removed.isEmpty {
+            let removedIds = Set(removed.map { $0.id })
+            let removedPaths = Set(removed.map { $0.fileURL.path })
+            self.tracks.removeAll { removedIds.contains($0.id) }
+            do {
+                _ = try DatabaseManager.shared.write { db in
+                    try TrackRecord
+                        .filter(removedPaths.contains(Column("filePath")))
+                        .deleteAll(db)
+                }
+            } catch {
+                print("[LibraryManager] prune DB error: \(error)")
             }
-            
-            // It's a new track
-            let track = createTrackFast(from: fileURL)
-            newTracks.append(track)
-            print("[LibraryManager] Created new track: \(track.title)")
+            print("[LibraryManager] Pruned \(removed.count) deleted songs from \(url.lastPathComponent)")
         }
-        
-        // 3. Process Deletions (Pruning)
-        // dbPaths now contains only paths that are in DB but NOT in File System
-        if !dbPaths.isEmpty {
-            await MainActor.run {
-                // Remove from memory
-                self.tracks.removeAll { dbPaths.contains($0.fileURL.path) }
-            }
-            // Remove from DB
-            DatabaseManager.shared.writeAsync { db in
-                try TrackRecord
-                    .filter(dbPaths.contains(Column("filePath")))
-                    .deleteAll(db)
-            }
-            print("[LibraryManager] Pruned \(dbPaths.count) deleted songs from \(url.lastPathComponent)")
-        }
-        
-        // 4. Process Additions
+
+        // 4. Additions — idempotent in memory, guarded in the DB.
         if !newTracks.isEmpty {
-            await MainActor.run {
-                self.tracks.append(contentsOf: newTracks)
-                // Sort by Title for now; Date Added view handles its own sort
-                self.tracks.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-                self.rebuildIndexes()
-            }
-            
-            // Save to database
-            DatabaseManager.shared.writeAsync { db in
-                for track in newTracks {
-                    try TrackRecord(from: track).insert(db)
+            let added = appendTracksDeduplicated(newTracks)
+            self.tracks.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+
+            if !added.isEmpty {
+                do {
+                    try DatabaseManager.shared.write { db in
+                        for track in added {
+                            let exists = try TrackRecord
+                                .filter(Column("filePath") == track.fileURL.path)
+                                .fetchCount(db) > 0
+                            if !exists {
+                                try TrackRecord(from: track).insert(db)
+                            }
+                        }
+                    }
+                } catch {
+                    print("[LibraryManager] add DB error: \(error)")
+                }
+                print("[LibraryManager] Added \(added.count) new songs from \(url.lastPathComponent)")
+
+                Task.detached(priority: .background) { [weak self] in
+                    await self?.extractMetadataInBackground(for: added)
                 }
             }
-            
-            print("[LibraryManager] Added \(newTracks.count) new songs from \(url.lastPathComponent)")
-            
-            // Background metadata extraction
-            Task.detached(priority: .background) { [weak self] in
-                await self?.extractMetadataInBackground(for: newTracks)
-            }
         }
-        
-        // Update indexes if we deleted stuff
-        if !dbPaths.isEmpty || !newTracks.isEmpty {
-            await MainActor.run { self.rebuildIndexes() }
-        }
-        
-        await MainActor.run {
-            self.isScanning = false
+
+        if !removed.isEmpty || !newTracks.isEmpty {
+            self.rebuildIndexes()
         }
     }
     
@@ -466,7 +466,97 @@ final class LibraryManager: ObservableObject {
             dateAdded: dateAdded // Use actual file creation date
         )
     }
-    
+
+    // MARK: - Deduplication
+
+    /// Stable identity key for a local file: symlink-resolved, standardized,
+    /// lowercased path. Two URLs that point at the same file produce the same
+    /// key even if their textual form differs.
+    private func canonicalKey(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
+    }
+
+    /// Identity key for any track (local file path or remote URL).
+    private func trackKey(_ track: Track) -> String {
+        track.isRemote ? track.fileURL.absoluteString : canonicalKey(track.fileURL)
+    }
+
+    /// Append tracks to the in-memory library, skipping any whose identity key
+    /// is already present (or duplicated within `incoming`). Returns only the
+    /// tracks that were actually added so callers can scope DB writes and
+    /// metadata extraction to genuine additions.
+    @discardableResult
+    private func appendTracksDeduplicated(_ incoming: [Track]) -> [Track] {
+        var seen = Set(tracks.map { trackKey($0) })
+        var added: [Track] = []
+        for t in incoming {
+            let key = trackKey(t)
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            tracks.append(t)
+            added.append(t)
+        }
+        return added
+    }
+
+    /// One-time repair run at launch: collapse any in-memory duplicate tracks
+    /// (same underlying file / remote URL) that earlier buggy scans or imports
+    /// may have produced, and re-point playlist rows that referenced a dropped
+    /// duplicate id at the surviving track.
+    private func deduplicateLoadedLibrary() {
+        var survivorByKey: [String: String] = [:]   // key -> surviving id
+        var idRemap: [String: String] = [:]          // dropped id -> survivor id
+        var deduped: [Track] = []
+        deduped.reserveCapacity(tracks.count)
+
+        for t in tracks {
+            let key = trackKey(t)
+            if let survivorId = survivorByKey[key] {
+                if survivorId != t.id.uuidString {
+                    idRemap[t.id.uuidString] = survivorId
+                }
+            } else {
+                survivorByKey[key] = t.id.uuidString
+                deduped.append(t)
+            }
+        }
+
+        guard deduped.count != tracks.count else { return }
+        let removedCount = tracks.count - deduped.count
+        tracks = deduped
+        print("[LibraryManager] Cleanup: removed \(removedCount) duplicate track(s) from library")
+
+        guard !idRemap.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            do {
+                try DatabaseManager.shared.write { db in
+                    for (oldId, newId) in idRemap {
+                        // Drop playlist rows that would collide with an
+                        // existing (playlistId, survivor) pair, re-point the
+                        // rest, then delete the orphaned duplicate track row.
+                        try db.execute(sql: """
+                            DELETE FROM playlistTrack
+                            WHERE trackId = ?
+                              AND EXISTS (
+                                SELECT 1 FROM playlistTrack p2
+                                WHERE p2.playlistId = playlistTrack.playlistId
+                                  AND p2.trackId = ?
+                              )
+                            """, arguments: [oldId, newId])
+                        try db.execute(
+                            sql: "UPDATE playlistTrack SET trackId = ? WHERE trackId = ?",
+                            arguments: [newId, oldId])
+                        try db.execute(
+                            sql: "DELETE FROM track WHERE id = ?",
+                            arguments: [oldId])
+                    }
+                }
+            } catch {
+                print("[LibraryManager] cleanup remap error: \(error)")
+            }
+        }
+    }
+
     // MARK: - Metadata Extraction
     
     private func extractMetadataInBackground(for newTracks: [Track]) async {
@@ -1358,10 +1448,10 @@ final class LibraryManager: ObservableObject {
             return summary
         }
 
-        // Index existing local tracks by normalized path.
-        func normalize(_ u: URL) -> String {
-            u.resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
-        }
+        // Index existing local tracks by normalized path. Uses the same
+        // canonical key as the rest of the library so in-memory and DB
+        // matching stay consistent.
+        func normalize(_ u: URL) -> String { self.canonicalKey(u) }
         var existingByPath: [String: Track] = [:]
         for t in tracks where !t.isRemote {
             existingByPath[normalize(t.fileURL)] = t
@@ -1457,14 +1547,15 @@ final class LibraryManager: ObservableObject {
         }
 
         // Make imported tracks available in memory — `getTracks(for:)`
-        // resolves ids against `self.tracks`.
-        tracks.append(contentsOf: newDiskTracks)
-        tracks.append(contentsOf: newRemoteTracks)
+        // resolves ids against `self.tracks`. Deduplicated so a file already
+        // in the library (matched in the DB by path) is never added twice.
+        let addedDisk = appendTracksDeduplicated(newDiskTracks)
+        appendTracksDeduplicated(newRemoteTracks)
         rebuildIndexes()
 
-        if !newDiskTracks.isEmpty {
+        if !addedDisk.isEmpty {
             Task.detached(priority: .background) { [weak self] in
-                await self?.extractMetadataInBackground(for: newDiskTracks)
+                await self?.extractMetadataInBackground(for: addedDisk)
             }
         }
 
