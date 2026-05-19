@@ -139,7 +139,9 @@ class OnlineViewModel: ObservableObject {
             isLoading = true
             do {
                 if let url = try await tidalService.getStreamURL(trackID: track.id) {
-                    // Create a temporary Track object with artworkURL for display
+                    // Create a temporary Track object with artworkURL for display.
+                    // Streamed at LOSSLESS by default (see getStreamURL).
+                    let q = AudioQuality.info(forTidalQuality: "LOSSLESS")
                     let tempTrack = Track(
                         title: track.title,
                         artist: track.artistName,
@@ -148,7 +150,11 @@ class OnlineViewModel: ObservableObject {
                         fileURL: url,
                         artworkData: nil,
                         artworkURL: track.coverURL,
-                        externalID: String(track.id)
+                        externalID: String(track.id),
+                        sampleRate: q.sampleRate,
+                        bitDepth: q.bitDepth,
+                        bitrate: q.bitrate,
+                        codec: q.codec
                     )
                     
                     playbackManager.play(tempTrack)

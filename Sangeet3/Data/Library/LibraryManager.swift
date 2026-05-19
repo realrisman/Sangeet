@@ -97,6 +97,8 @@ final class LibraryManager: ObservableObject {
             // One-time repair for libraries that already accumulated duplicates.
             self.deduplicateLoadedLibrary()
             self.rebuildIndexes()
+            // Fill in audio-quality for tracks imported before this existed.
+            self.backfillAudioQuality()
         }
         
         // Always scan folders to detect new files
@@ -582,7 +584,19 @@ final class LibraryManager: ObservableObject {
                     if let artworkData = metadata.artworkData {
                         self.tracks[index].artworkData = artworkData
                     }
-                    
+                    if metadata.sampleRate > 0 {
+                        self.tracks[index].sampleRate = Int(metadata.sampleRate)
+                    }
+                    if let bitDepth = metadata.bitDepth {
+                        self.tracks[index].bitDepth = bitDepth
+                    }
+                    if let bitrate = metadata.bitrate {
+                        self.tracks[index].bitrate = bitrate
+                    }
+                    if let codec = metadata.codec {
+                        self.tracks[index].codec = codec
+                    }
+
                     // Update in database
                     let updatedTrack = self.tracks[index]
                     DatabaseManager.shared.writeAsync { db in
@@ -599,6 +613,46 @@ final class LibraryManager: ObservableObject {
         }
     }
     
+    /// Incremental, best-effort pass that fills in audio-quality fields
+    /// (sample rate / bit depth / bitrate / codec) for local tracks that
+    /// don't have them yet — i.e. libraries imported before the quality
+    /// badge existed. Detached + utility QoS so it never blocks the UI;
+    /// unreadable files stay unfixed and are retried next launch.
+    func backfillAudioQuality() {
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            let pending = await MainActor.run {
+                self.tracks.filter { !$0.isRemote && $0.sampleRate == nil }
+            }
+            guard !pending.isEmpty else { return }
+
+            for track in pending {
+                let accessing = track.fileURL.startAccessingSecurityScopedResource()
+                let info = MetadataExtractor.shared.extractAudioInfo(from: track.fileURL)
+                if accessing { track.fileURL.stopAccessingSecurityScopedResource() }
+
+                // Nothing readable -> leave unfixed, retried next launch.
+                guard info.sampleRate != nil || info.bitDepth != nil || info.bitrate != nil else { continue }
+
+                await MainActor.run {
+                    guard let idx = self.tracks.firstIndex(where: { $0.id == track.id }) else { return }
+                    self.tracks[idx].sampleRate = info.sampleRate
+                    self.tracks[idx].bitDepth = info.bitDepth
+                    self.tracks[idx].bitrate = info.bitrate
+                    if let codec = info.codec { self.tracks[idx].codec = codec }
+
+                    let updated = self.tracks[idx]
+                    DatabaseManager.shared.writeAsync { db in
+                        let record = TrackRecord(from: updated)
+                        try record.update(db)
+                    }
+                }
+            }
+
+            await MainActor.run { self.rebuildIndexes() }
+        }
+    }
+
     func updateTrackMetadata(track: Track) {
         if let index = tracks.firstIndex(where: { $0.id == track.id }) {
             tracks[index] = track
@@ -1109,7 +1163,9 @@ final class LibraryManager: ObservableObject {
                 // Generate Deterministic UUID based on Tidal ID
                 // UUID from string hash is reliable for duplicates
                 let uuidString = UUID(uuidString: "00000000-0000-0000-0000-\(String(format: "%012d", tidalTrack.id))") ?? UUID()
-                
+
+                // Tidal is streamed at LOSSLESS by default (see getStreamURL).
+                let q = AudioQuality.info(forTidalQuality: "LOSSLESS")
                 references.append(Track(
                     id: uuidString,
                     title: tidalTrack.title,
@@ -1118,7 +1174,11 @@ final class LibraryManager: ObservableObject {
                     duration: TimeInterval(tidalTrack.duration),
                     fileURL: URL(string: "tidal://\(tidalTrack.id)")!,
                     artworkURL: tidalTrack.coverURL,
-                    externalID: String(tidalTrack.id)
+                    externalID: String(tidalTrack.id),
+                    sampleRate: q.sampleRate,
+                    bitDepth: q.bitDepth,
+                    bitrate: q.bitrate,
+                    codec: q.codec
                 ))
             }
         }

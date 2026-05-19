@@ -35,6 +35,10 @@ final class MetadataExtractor {
         metadata.album = bassMetadata.album
         metadata.year = bassMetadata.year
         metadata.duration = bassMetadata.duration
+        metadata.sampleRate = bassMetadata.sampleRate
+        metadata.bitDepth = bassMetadata.bitDepth
+        metadata.bitrate = bassMetadata.bitrate
+        metadata.codec = bassMetadata.codec
         
         // Extract artwork using AVFoundation (most reliable for all formats)
         metadata.artworkData = await extractArtworkWithAVFoundation(from: url)
@@ -79,6 +83,18 @@ final class MetadataExtractor {
                 // Duration
                 let bytes = BASS_ChannelGetLength(stream, DWORD(BASS_POS_BYTE))
                 meta.duration = BASS_ChannelBytes2Seconds(stream, bytes)
+
+                // Audio fidelity: sample rate + bit depth (origres) + bitrate
+                var info = BASS_CHANNELINFO()
+                if BASS_ChannelGetInfo(stream, &info) != 0 {
+                    if info.freq > 0 { meta.sampleRate = Double(info.freq) }
+                    let depth = Int(info.origres & 0xFFFF) // mask off BASS_ORIGRES_FLOAT
+                    if depth > 0 { meta.bitDepth = depth }
+                }
+                var bitrate: Float = 0
+                BASS_ChannelGetAttribute(stream, DWORD(BASS_ATTRIB_BITRATE), &bitrate)
+                if bitrate > 0 { meta.bitrate = Int(bitrate.rounded()) }
+                meta.codec = AudioQuality.codec(forExtension: url.pathExtension)
                 
                 // ID3v1 tags
                 if let tags = self.extractID3v1(from: stream) {
@@ -338,6 +354,39 @@ final class MetadataExtractor {
         }
         return 0
     }
+
+    // MARK: - Lightweight Audio Info (for backfill)
+
+    /// Open the file just long enough to read sample rate, bit depth and
+    /// bitrate (no tag/artwork parsing). Used by the library backfill pass.
+    func extractAudioInfo(from url: URL) -> (sampleRate: Int?, bitDepth: Int?, bitrate: Int?, codec: String?) {
+        let codec = AudioQuality.codec(forExtension: url.pathExtension)
+        let stream = BASS_StreamCreateFile(
+            BOOL32(truncating: false),
+            url.path,
+            0,
+            0,
+            DWORD(BASS_STREAM_DECODE)
+        )
+
+        guard stream != 0 else { return (nil, nil, nil, codec) }
+        defer { BASS_StreamFree(stream) }
+
+        var sampleRate: Int?
+        var bitDepth: Int?
+        var info = BASS_CHANNELINFO()
+        if BASS_ChannelGetInfo(stream, &info) != 0 {
+            if info.freq > 0 { sampleRate = Int(info.freq) }
+            let depth = Int(info.origres & 0xFFFF) // mask off BASS_ORIGRES_FLOAT
+            if depth > 0 { bitDepth = depth }
+        }
+
+        var br: Float = 0
+        BASS_ChannelGetAttribute(stream, DWORD(BASS_ATTRIB_BITRATE), &br)
+        let bitrate = br > 0 ? Int(br.rounded()) : nil
+
+        return (sampleRate, bitDepth, bitrate, codec)
+    }
 }
 
 // MARK: - Track Metadata
@@ -352,6 +401,9 @@ struct TrackMetadata {
     var fileURL: URL?
     var replayGainDB: Float?  // ReplayGain value in dB
     var sampleRate: Double = 0  // Source sample rate
+    var bitDepth: Int?        // Source bit depth (origres)
+    var bitrate: Int?         // kbps
+    var codec: String?        // From file extension
     
     func toTrack() -> Track {
         Track(
