@@ -52,15 +52,17 @@ class SmartMetadataManager: ObservableObject {
     
     // Bulk Fix
     func fixAllMetadata(libraryManager: LibraryManager) async {
-        let tracks = await MainActor.run { libraryManager.tracks }
-        
+        // Only process tracks not yet successfully tagged (the "fix list").
+        // No-match / network-failed tracks stay unfixed and retry next run.
+        let tracks = await MainActor.run { libraryManager.tracks.filter { !$0.metadataFixed } }
+
         await MainActor.run {
             totalCount = tracks.count
             processedCount = 0
             isBulkFixing = true
             isSearching = true // Keep global flag for UI disabled state elsewhere
         }
-        
+
         for track in tracks {
             // Check for cancellation? (Not implemented for MVP)
             
@@ -127,7 +129,8 @@ class SmartMetadataManager: ObservableObject {
                 if let art = artworkData {
                     updatedTrack.artworkData = art
                 }
-                
+                updatedTrack.metadataFixed = true // Mark fixed; persisted in the single updateTrackMetadata write
+
                 // Persist logic needs to call LibraryManager
                 // Since performFix is async, we need to jump to MainActor to call updateTrackMetadata
                 await MainActor.run {

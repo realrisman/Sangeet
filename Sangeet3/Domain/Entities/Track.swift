@@ -20,7 +20,8 @@ struct Track: Identifiable, Hashable {
     var playCount: Int
     var lastPlayed: Date?
     var dateAdded: Date
-    
+    var metadataFixed: Bool = false
+
     var formattedDuration: String {
         let minutes = Int(duration) / 60
         let seconds = Int(duration) % 60
@@ -35,8 +36,8 @@ struct Track: Identifiable, Hashable {
     
     var externalID: String? // For reliable identification (e.g. Tidal ID)
     
-    init(id: UUID = UUID(), title: String, artist: String = "Unknown Artist", album: String = "Unknown Album", duration: TimeInterval = 0, fileURL: URL, artworkData: Data? = nil, artworkURL: URL? = nil, isFavorite: Bool = false, playCount: Int = 0, lastPlayed: Date? = nil, dateAdded: Date = Date(), externalID: String? = nil) {
-        self.id = id; self.title = title; self.artist = artist; self.album = album; self.duration = duration; self.fileURL = fileURL; self.artworkData = artworkData; self.artworkURL = artworkURL; self.isFavorite = isFavorite; self.playCount = playCount; self.lastPlayed = lastPlayed; self.dateAdded = dateAdded; self.externalID = externalID
+    init(id: UUID = UUID(), title: String, artist: String = "Unknown Artist", album: String = "Unknown Album", duration: TimeInterval = 0, fileURL: URL, artworkData: Data? = nil, artworkURL: URL? = nil, isFavorite: Bool = false, playCount: Int = 0, lastPlayed: Date? = nil, dateAdded: Date = Date(), externalID: String? = nil, metadataFixed: Bool = false) {
+        self.id = id; self.title = title; self.artist = artist; self.album = album; self.duration = duration; self.fileURL = fileURL; self.artworkData = artworkData; self.artworkURL = artworkURL; self.isFavorite = isFavorite; self.playCount = playCount; self.lastPlayed = lastPlayed; self.dateAdded = dateAdded; self.externalID = externalID; self.metadataFixed = metadataFixed
     }
     
     func hash(into hasher: inout Hasher) {

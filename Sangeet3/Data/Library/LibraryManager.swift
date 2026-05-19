@@ -520,7 +520,20 @@ final class LibraryManager: ObservableObject {
             }
         }
     }
-    
+
+    /// Clears the metadata "fixed" flag for every track so the next
+    /// auto-tagging run reprocesses the whole library from scratch.
+    /// Single in-memory pass + one bulk SQL write (the flag is in no
+    /// index or derived collection, so no rebuildIndexes needed).
+    func resetAllMetadataFixed() {
+        for i in tracks.indices where tracks[i].metadataFixed {
+            tracks[i].metadataFixed = false
+        }
+        DatabaseManager.shared.writeAsync { db in
+            try db.execute(sql: "UPDATE track SET metadataFixed = 0")
+        }
+    }
+
     // MARK: - Track Operations
     
     func toggleFavorite(_ track: Track) {

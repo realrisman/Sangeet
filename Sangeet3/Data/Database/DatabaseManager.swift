@@ -173,6 +173,18 @@ final class DatabaseManager: ObservableObject {
             }
         }
         
+        // Version 6: Add metadataFixed to track for incremental auto-tagging
+        migrator.registerMigration("v6_track_metadata_fixed") { db in
+            if try db.tableExists("track") {
+                let columns = try db.columns(in: "track")
+                if !columns.contains(where: { $0.name == "metadataFixed" }) {
+                    try db.alter(table: "track") { t in
+                        t.add(column: "metadataFixed", .boolean).notNull().defaults(to: false)
+                    }
+                }
+            }
+        }
+
         return migrator
     }
     

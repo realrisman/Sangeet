@@ -26,7 +26,8 @@ struct TrackRecord: Codable, FetchableRecord, PersistableRecord {
     var lastPlayed: Date?
     var dateAdded: Date
     var folderPath: String
-    
+    var metadataFixed: Bool
+
     // MARK: - Conversion to/from Track
     
     init(from track: Track) {
@@ -43,6 +44,7 @@ struct TrackRecord: Codable, FetchableRecord, PersistableRecord {
         self.lastPlayed = track.lastPlayed
         self.dateAdded = track.dateAdded
         self.folderPath = track.fileURL.deletingLastPathComponent().path
+        self.metadataFixed = track.metadataFixed
     }
     
     func toTrack() -> Track {
@@ -57,7 +59,8 @@ struct TrackRecord: Codable, FetchableRecord, PersistableRecord {
             isFavorite: isFavorite,
             playCount: playCount,
             lastPlayed: lastPlayed,
-            dateAdded: dateAdded
+            dateAdded: dateAdded,
+            metadataFixed: metadataFixed
         )
     }
 }

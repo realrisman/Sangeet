@@ -249,12 +249,16 @@ struct MetadataSettingsSheet: View {
     @EnvironmentObject var libraryManager: LibraryManager
     @Environment(\.dismiss) var dismiss
 
+    private var remainingCount: Int {
+        libraryManager.tracks.filter { !$0.metadataFixed }.count
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Text("Metadata Management").font(.headline)
             Text("Scan library and auto-tag songs with iTunes metadata.")
                 .multilineTextAlignment(.center)
-            
+
             if metadataManager.isBulkFixing {
                 // If already running, show status but user can close sheet and watch top bar
                 Text("Scan in progress... Check the top bar.")
@@ -262,7 +266,11 @@ struct MetadataSettingsSheet: View {
                 ProgressView()
                     .padding(.bottom, 10)
             } else {
-                Button("Start Auto-Tagging") {
+                Text("\(remainingCount) of \(libraryManager.tracks.count) songs not yet tagged.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                Button(remainingCount > 0 ? "Tag \(remainingCount) Remaining Songs" : "All Songs Tagged") {
                     Task {
                         dismiss() // Close sheet immediately
                         // Give explicit delay to allow sheet to close before heaviness
@@ -271,6 +279,17 @@ struct MetadataSettingsSheet: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(remainingCount == 0)
+
+                Button("Re-tag All") {
+                    Task {
+                        dismiss() // Close sheet immediately
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        await MainActor.run { libraryManager.resetAllMetadataFixed() }
+                        await metadataManager.fixAllMetadata(libraryManager: libraryManager)
+                    }
+                }
+                .buttonStyle(.bordered)
             }
             Button("Done") { dismiss() }
         }
