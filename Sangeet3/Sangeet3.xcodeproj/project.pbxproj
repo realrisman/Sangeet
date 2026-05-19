@@ -74,6 +74,8 @@
 		FFB00042 /* Presentation/Components/EqualizerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA00042 /* Presentation/Components/EqualizerView.swift */; };
 		FFB00043 /* Presentation/Components/DownloadButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA00043 /* Presentation/Components/DownloadButton.swift */; };
 		FFB00044 /* Presentation/Theme/ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA00044 /* Presentation/Theme/ThemeManager.swift */; };
+		FFB00045 /* Domain/Entities/AudioQuality.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA00045 /* Domain/Entities/AudioQuality.swift */; };
+		FFB00046 /* Presentation/Components/QualityBadgeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA00046 /* Presentation/Components/QualityBadgeView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -150,6 +152,8 @@
 		FFA00042 /* Presentation/Components/EqualizerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Presentation/Components/EqualizerView.swift; sourceTree = "<group>"; };
 		FFA00043 /* Presentation/Components/DownloadButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Presentation/Components/DownloadButton.swift; sourceTree = "<group>"; };
 		FFA00044 /* Presentation/Theme/ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Presentation/Theme/ThemeManager.swift; sourceTree = "<group>"; };
+		FFA00045 /* Domain/Entities/AudioQuality.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Entities/AudioQuality.swift; sourceTree = "<group>"; };
+		FFA00046 /* Presentation/Components/QualityBadgeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Presentation/Components/QualityBadgeView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -225,6 +229,8 @@
 				FFA00017 /* Data/Audio/PlaybackManager.swift */,
 				FFA00018 /* Data/Metadata/SmartMetadataManager.swift */,
 				FFA00019 /* Domain/Entities/Track.swift */,
+				FFA00045 /* Domain/Entities/AudioQuality.swift */,
+				FFA00046 /* Presentation/Components/QualityBadgeView.swift */,
 				FFA00020 /* ContentView.swift */,
 				FFA00021 /* Presentation/Screens/Settings/SettingsView.swift */,
 				FFA00022 /* Presentation/Screens/Home/HomeView.swift */,
@@ -381,6 +387,8 @@
 				627734232F0A8AE10091C40C /* OnlineViewModel.swift in Sources */,
 				627734242F0A8AE10091C40C /* OnlineView.swift in Sources */,
 				FFB00019 /* Domain/Entities/Track.swift in Sources */,
+				FFB00045 /* Domain/Entities/AudioQuality.swift in Sources */,
+				FFB00046 /* Presentation/Components/QualityBadgeView.swift in Sources */,
 				FFB00020 /* ContentView.swift in Sources */,
 				FFB00021 /* Presentation/Screens/Settings/SettingsView.swift in Sources */,
 				FFB00022 /* Presentation/Screens/Home/HomeView.swift in Sources */,

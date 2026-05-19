@@ -27,6 +27,10 @@ struct TrackRecord: Codable, FetchableRecord, PersistableRecord {
     var dateAdded: Date
     var folderPath: String
     var metadataFixed: Bool
+    var sampleRate: Int?
+    var bitDepth: Int?
+    var bitrate: Int?
+    var codec: String?
 
     // MARK: - Conversion to/from Track
     
@@ -45,6 +49,10 @@ struct TrackRecord: Codable, FetchableRecord, PersistableRecord {
         self.dateAdded = track.dateAdded
         self.folderPath = track.fileURL.deletingLastPathComponent().path
         self.metadataFixed = track.metadataFixed
+        self.sampleRate = track.sampleRate
+        self.bitDepth = track.bitDepth
+        self.bitrate = track.bitrate
+        self.codec = track.codec
     }
     
     func toTrack() -> Track {
@@ -60,7 +68,11 @@ struct TrackRecord: Codable, FetchableRecord, PersistableRecord {
             playCount: playCount,
             lastPlayed: lastPlayed,
             dateAdded: dateAdded,
-            metadataFixed: metadataFixed
+            metadataFixed: metadataFixed,
+            sampleRate: sampleRate,
+            bitDepth: bitDepth,
+            bitrate: bitrate,
+            codec: codec
         )
     }
 }

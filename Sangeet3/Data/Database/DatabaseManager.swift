@@ -185,6 +185,20 @@ final class DatabaseManager: ObservableObject {
             }
         }
 
+        // Version 7: Add audio quality fields to track (Hi-Res / Lossless badge)
+        migrator.registerMigration("v7_track_audio_quality") { db in
+            if try db.tableExists("track") {
+                let columns = try db.columns(in: "track")
+                let names = Set(columns.map { $0.name })
+                try db.alter(table: "track") { t in
+                    if !names.contains("sampleRate") { t.add(column: "sampleRate", .integer) }
+                    if !names.contains("bitDepth")   { t.add(column: "bitDepth", .integer) }
+                    if !names.contains("bitrate")    { t.add(column: "bitrate", .integer) }
+                    if !names.contains("codec")      { t.add(column: "codec", .text) }
+                }
+            }
+        }
+
         return migrator
     }
     
